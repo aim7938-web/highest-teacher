@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>하이스트 선생님</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="apple-touch-icon" href="icon-192.png">
+<link rel="icon" href="icon-192.png">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="하이스트 선생님">
+<meta name="theme-color" content="#1E5450">
+<style>
+  html,body{margin:0;height:100%;background:#F5F9F9;overflow:hidden}
+  iframe{position:fixed;inset:0;width:100%;height:100%;border:0}
+  #msg{font-family:'Malgun Gothic',sans-serif;color:#68736F;text-align:center;padding:40vh 24px 0;font-size:17px;line-height:1.6}
+  #bar{position:fixed;left:10px;right:10px;bottom:calc(10px + env(safe-area-inset-bottom));z-index:9;
+       display:none;align-items:center;gap:10px;padding:12px 12px 12px 14px;border-radius:14px;
+       background:#1E5450;color:#fff;box-shadow:0 8px 28px rgba(0,0,0,.25);
+       font:14px/1.5 -apple-system,'Apple SD Gothic Neo','Malgun Gothic',sans-serif}
+  #bar .tx{flex:1}
+  #bar button{border:0;border-radius:9px;font:inherit;font-weight:700;cursor:pointer}
+  #bar .go{background:#fff;color:#1E5450;padding:8px 12px;white-space:nowrap}
+  #bar .x{background:transparent;color:#fff;font-size:20px;line-height:1;padding:2px 4px;opacity:.7}
+</style>
+</head>
+<body>
+<div id="msg">불러오는 중…</div>
+<div id="bar"><div class="tx"></div><button class="go" hidden></button><button class="x" aria-label="닫기">×</button></div>
+<script>
+  // 선생님 앱 정식 배포 주소 — teacher/올리기.bat의 배포 ID와 같아야 함
+  var APP = 'https://script.google.com/macros/s/AKfycbyU84AgX71acMWlliBptTDTMLBL93zVXmxojAqdXLYbd6pBTQ7gQm_T20flA97zy9Ex/exec';
+
+  // 알림(FCM) 설정 — 파이어베이스 프로젝트에서 받아 적는다.
+  // appId가 비어 있으면 알림 기능은 조용히 꺼진다(겉 페이지는 그대로 쓸 수 있음). 공개돼도 되는 값.
+  var PUSH = {
+    apiKey: 'AIzaSyBIBrB2RN_5OVesH2T3qXW5Zt_Bz9Z1CJw', authDomain: 'highest-push.firebaseapp.com',
+    projectId: 'highest-push', messagingSenderId: '623997019111',
+    appId: '1:623997019111:web:1de56f27ceec004a951342',
+    vapidKey: 'BKpZ1qvO03ysuRmf3cptGOB0-4e3zT8O0VAwzIM-pfpo1Sq8_LtQsuvEtqxaDjn76fO4ClE9GCeKkWHS8cvSY6U'
+  };
+  var FB = 'https://www.gstatic.com/firebasejs/10.12.2/';
+
+  var f = document.createElement('iframe');
+  f.src = APP;
+  f.title = '하이스트 선생님';
+  f.onload = function () { var m = document.getElementById('msg'); if (m) m.remove(); };
+  document.body.appendChild(f);
+
+  // ─── 선생님 앱 화면과 연결 ──────────────────────────────
+  // 앱이 로그인하면 {highest:'need-fcm'}을 보냄 → 이 기기의 알림 주소(FCM 토큰)를 돌려줌.
+  // 로그인 정보는 이쪽으로 오지 않음. 앱이 자기 로그인으로 등록함(pushSubscribe).
+  var FCM = '', peer = null, peerOrigin = '';
+  window.addEventListener('message', function (e) {
+    if (!/^https:\/\/[\w.-]+\.googleusercontent\.com$/.test(e.origin)) return;
+    if (!e.data || e.data.highest !== 'need-fcm') return;
+    peer = e.source; peerOrigin = e.origin;
+    give();
+  });
+  function give() {
+    if (!FCM || !peer) return;
+    try { peer.postMessage({ highest: 'fcm', fcm: FCM, ua: navigator.userAgent.slice(0, 150) }, peerOrigin); } catch (e) {}
+  }
+
+  setupPush();
+
+  // ─── 알림 ───────────────────────────────────────────
+  function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) {} }
+
+  function bar(text, btn, onBtn, dismissKey) {
+    var b = document.getElementById('bar'), go = b.querySelector('.go');
+    b.querySelector('.tx').textContent = text;
+    go.hidden = !btn; go.textContent = btn || ''; go.onclick = onBtn || null;
+    b.querySelector('.x').onclick = function () {
+      b.style.display = 'none';
+      if (dismissKey) store(dismissKey, String(Date.now()));
+    };
+    b.style.display = 'flex';
+  }
+  function hideBar() { document.getElementById('bar').style.display = 'none'; }
+  function dismissed(k, days) { return Date.now() - Number(store(k) || 0) < days * 864e5; }
+
+  function setupPush() {
+    if (!('serviceWorker' in navigator)) return;
+    navigator.serviceWorker.register('sw.js').then(function (reg) {
+      clearBadge(reg);
+      document.addEventListener('visibilitychange', function () {
+        if (document.visibilityState === 'visible') clearBadge(reg);
+      });
+      if (!PUSH.appId) return;
+
+      var ua = navigator.userAgent;
+      var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
+      var standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
+      var ok = 'Notification' in window && 'PushManager' in window;
+
+      if (/KAKAOTALK/i.test(ua)) {
+        if (!dismissed('hiBarKakao', 7))
+          bar('카카오톡 안에서는 알림을 받을 수 없어요. 오른쪽 아래 ⋮(또는 공유) → "다른 브라우저로 열기"를 눌러 주세요.', '', null, 'hiBarKakao');
+        return;
+      }
+      if (ios && !standalone) {
+        if (!dismissed('hiBarIos', 7))
+          bar('알림을 받으려면 아래 공유 버튼(□↑) → "홈 화면에 추가"를 누른 뒤, 홈 화면의 하이스트 아이콘으로 열어 주세요.', '', null, 'hiBarIos');
+        return;
+      }
+      if (!ok) return;
+
+      if (Notification.permission === 'granted') { getFcm(reg); return; }
+      if (Notification.permission === 'denied') return;
+      if (dismissed('hiBarAsk', 3)) return;
+      bar('새 상담 요청이 들어오면 알림으로 알려 드릴까요?', '알림 받기', function () {
+        Notification.requestPermission().then(function (p) {
+          if (p === 'granted') {
+            getFcm(reg);
+            bar('알림이 켜졌어요. 로그인하면 이 휴대폰이 내 계정에 등록돼요.');
+            setTimeout(hideBar, 4000);
+          } else {
+            bar('알림이 꺼져 있어요. 휴대폰 설정에서 이 앱(또는 브라우저)의 알림을 허용하면 받을 수 있어요.', '', null, 'hiBarAsk');
+          }
+        });
+      }, 'hiBarAsk');
+    }).catch(function () {});
+  }
+
+  function clearBadge(reg) {
+    try { if (navigator.clearAppBadge) navigator.clearAppBadge(); } catch (e) {}
+    try { reg.getNotifications().then(function (ns) { ns.forEach(function (n) { n.close(); }); }); } catch (e) {}
+  }
+
+  // 이 기기의 알림 주소(FCM 토큰) 받기 → 선생님 앱 화면에 넘겨 줌
+  function getFcm(reg) {
+    Promise.all([import(FB + 'firebase-app.js'), import(FB + 'firebase-messaging.js')])
+      .then(function (m) {
+        var app = m[0].initializeApp(PUSH);
+        return m[1].getToken(m[1].getMessaging(app), { vapidKey: PUSH.vapidKey, serviceWorkerRegistration: reg });
+      })
+      .then(function (fcm) { if (fcm) { FCM = fcm; give(); } })
+      .catch(function () {});
+  }
+</script>
+</body>
+</html>
