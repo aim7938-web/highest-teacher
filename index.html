@@ -57,70 +57,109 @@
     if (!e.data || e.data.highest !== 'need-fcm') return;
     peer = e.source; peerOrigin = e.origin;
     give();
+    entered = true; nextBar();   // need-fcm은 로그인한 뒤에 온다 → 그때 설치·알림 안내를 띄운다
   });
   function give() {
     if (!FCM || !peer) return;
     try { peer.postMessage({ highest: 'fcm', fcm: FCM, ua: navigator.userAgent.slice(0, 150) }, peerOrigin); } catch (e) {}
   }
 
+  // ─── 아래 안내 띠: ① 바탕화면 설치 → ② 알림 받기 (2026-10-22 원장님 요청) ─────
+  // 로그인한 뒤(need-fcm을 받은 뒤)에만 띄운다. 웹페이지는 허락 없이 아이콘을 깔 수 없어서,
+  // 안드로이드·PC 크롬/엣지는 [설치] 단추로 설치 창을 띄우고, 아이폰은 공유 → '홈 화면에 추가'를 안내한다.
+  var entered = false, installEvt = null, REG = null;
+  var UA = navigator.userAgent;
+  var IOS = /iPhone|iPad|iPod/.test(UA) || (/Macintosh/.test(UA) && navigator.maxTouchPoints > 1);
+  var KAKAOTALK = /KAKAOTALK/i.test(UA);
+  function standalone() { return (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone; }
+
+  // 설치할 수 있으면 이 신호가 온다 (이미 설치했으면 안 온다)
+  window.addEventListener('beforeinstallprompt', function (e) {
+    e.preventDefault();
+    installEvt = e;
+    if (entered) nextBar();
+  });
+  window.addEventListener('appinstalled', function () {
+    installEvt = null;
+    bar('바탕화면에 하이스트 아이콘을 만들었어요. 다음부터 아이콘을 눌러 열어 주세요.');
+    setTimeout(nextBar, 4000);
+  });
+
   setupPush();
 
-  // ─── 알림 ───────────────────────────────────────────
   function store(k, v) { try { if (v === undefined) return localStorage.getItem(k); localStorage.setItem(k, v); } catch (e) {} }
 
-  function bar(text, btn, onBtn, dismissKey) {
+  function bar(text, btn, onBtn, dismissKey, onClose) {
     var b = document.getElementById('bar'), go = b.querySelector('.go');
     b.querySelector('.tx').textContent = text;
     go.hidden = !btn; go.textContent = btn || ''; go.onclick = onBtn || null;
     b.querySelector('.x').onclick = function () {
       b.style.display = 'none';
       if (dismissKey) store(dismissKey, String(Date.now()));
+      if (onClose) onClose();
     };
     b.style.display = 'flex';
   }
   function hideBar() { document.getElementById('bar').style.display = 'none'; }
   function dismissed(k, days) { return Date.now() - Number(store(k) || 0) < days * 864e5; }
 
+  // 지금 띄울 안내 하나를 고른다
+  function nextBar() {
+    if (!entered) return;
+    if (KAKAOTALK) {
+      if (!dismissed('hiBarKakao', 7))
+        bar('카카오톡 안에서는 바탕화면 설치와 알림이 안 돼요. 오른쪽 아래 ⋮(또는 공유) → "다른 브라우저로 열기"를 눌러 주세요.', '', null, 'hiBarKakao');
+      return;
+    }
+    if (!standalone()) {
+      if (installEvt && !dismissed('hiBarInstall', 3)) {
+        bar('하이스트 선생님 앱을 바탕화면에 설치할까요? 다음부터 아이콘으로 바로 열려요.', '설치', function () {
+          var ev = installEvt;
+          installEvt = null;
+          hideBar();
+          ev.prompt();
+          ev.userChoice.then(function (c) {
+            if (c.outcome !== 'accepted') { store('hiBarInstall', String(Date.now())); nextBar(); }
+          });
+        }, 'hiBarInstall', nextBar);
+        return;
+      }
+      if (IOS) {
+        if (!dismissed('hiBarIos', 3))
+          bar('바탕화면에 설치하려면 아래 공유 버튼(□↑) → "홈 화면에 추가"를 눌러 주세요. 아이콘으로 열어야 알림도 받을 수 있어요.', '', null, 'hiBarIos');
+        return;   // 아이폰은 홈 화면 아이콘으로 열어야만 알림이 된다
+      }
+    }
+    askPush();
+  }
+
+  function askPush() {
+    if (!REG || !PUSH.appId || !('Notification' in window) || !('PushManager' in window)) return;
+    if (Notification.permission !== 'default' || dismissed('hiBarAsk', 3)) return;
+    bar('새 상담 요청이 들어오면 알림으로 알려 드릴까요?', '알림 받기', function () {
+      Notification.requestPermission().then(function (p) {
+        if (p === 'granted') {
+          getFcm(REG);
+          bar('알림이 켜졌어요. 이 기기가 내 계정에 등록돼요.');
+          setTimeout(hideBar, 4000);
+        } else {
+          bar('알림이 꺼져 있어요. 휴대폰 설정에서 이 앱(또는 브라우저)의 알림을 허용하면 받을 수 있어요.', '', null, 'hiBarAsk');
+        }
+      });
+    }, 'hiBarAsk');
+  }
+
   function setupPush() {
     if (!('serviceWorker' in navigator)) return;
     navigator.serviceWorker.register('sw.js').then(function (reg) {
+      REG = reg;
       clearBadge(reg);
       document.addEventListener('visibilitychange', function () {
         if (document.visibilityState === 'visible') clearBadge(reg);
       });
-      if (!PUSH.appId) return;
-
-      var ua = navigator.userAgent;
-      var ios = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1);
-      var standalone = (window.matchMedia && matchMedia('(display-mode: standalone)').matches) || navigator.standalone;
-      var ok = 'Notification' in window && 'PushManager' in window;
-
-      if (/KAKAOTALK/i.test(ua)) {
-        if (!dismissed('hiBarKakao', 7))
-          bar('카카오톡 안에서는 알림을 받을 수 없어요. 오른쪽 아래 ⋮(또는 공유) → "다른 브라우저로 열기"를 눌러 주세요.', '', null, 'hiBarKakao');
-        return;
-      }
-      if (ios && !standalone) {
-        if (!dismissed('hiBarIos', 7))
-          bar('알림을 받으려면 아래 공유 버튼(□↑) → "홈 화면에 추가"를 누른 뒤, 홈 화면의 하이스트 아이콘으로 열어 주세요.', '', null, 'hiBarIos');
-        return;
-      }
-      if (!ok) return;
-
-      if (Notification.permission === 'granted') { getFcm(reg); return; }
-      if (Notification.permission === 'denied') return;
-      if (dismissed('hiBarAsk', 3)) return;
-      bar('새 상담 요청이 들어오면 알림으로 알려 드릴까요?', '알림 받기', function () {
-        Notification.requestPermission().then(function (p) {
-          if (p === 'granted') {
-            getFcm(reg);
-            bar('알림이 켜졌어요. 로그인하면 이 휴대폰이 내 계정에 등록돼요.');
-            setTimeout(hideBar, 4000);
-          } else {
-            bar('알림이 꺼져 있어요. 휴대폰 설정에서 이 앱(또는 브라우저)의 알림을 허용하면 받을 수 있어요.', '', null, 'hiBarAsk');
-          }
-        });
-      }, 'hiBarAsk');
+      // 이미 알림을 허용한 기기면 알림 주소만 조용히 받아 둔다
+      if (PUSH.appId && 'Notification' in window && Notification.permission === 'granted') getFcm(reg);
+      if (entered) nextBar();
     }).catch(function () {});
   }
 
